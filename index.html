@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#050816" />
+    <title>Hand Ripple Camera</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+  </head>
+  <body>
+    <main class="app">
+      <video id="camera" autoplay playsinline muted></video>
+      <canvas id="output"></canvas>
+
+      <section class="hud">
+        <div class="title-block">
+          <p class="eyebrow">Open source camera interaction</p>
+          <h1>Hand Ripple Camera</h1>
+        </div>
+
+        <div class="controls">
+          <button id="startBtn">Start camera</button>
+          <button id="switchBtn" disabled>Switch camera</button>
+        </div>
+
+        <p id="status">Tap Start camera to begin.</p>
+      </section>
+    </main>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
