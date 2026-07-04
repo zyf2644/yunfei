@@ -1,37 +1,414 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="theme-color" content="#04070f" />
-    <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta name="mobile-web-app-capable" content="yes" />
-    <title>Hand Ripple Rebuild</title>
-    <link rel="stylesheet" href="./rebuild.css" />
-  </head>
-  <body>
-    <main class="app">
-      <video id="camera" autoplay playsinline muted></video>
-      <canvas id="scene"></canvas>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Liquid Finger Ripple</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #02070c;
+      --fg: #d8e7ff;
+      --accent: #63d7ff;
+    }
 
-      <section class="hud">
-        <div class="title-block">
-          <p class="eyebrow">PixiJS baseline</p>
-          <h1>Hand Ripple Rebuild</h1>
-        </div>
+    * {
+      box-sizing: border-box;
+    }
 
-        <div class="controls">
-          <button id="startBtn">Start camera</button>
-          <button id="switchBtn" disabled>Switch camera</button>
-          <button id="copyUrlBtn">Copy phone link</button>
-        </div>
+    html,
+    body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at top, rgba(72, 133, 172, 0.16), transparent 42%),
+        radial-gradient(circle at bottom, rgba(12, 56, 78, 0.22), transparent 48%),
+        var(--bg);
+      font-family: "Segoe UI", system-ui, sans-serif;
+    }
 
-        <p id="status">Tap Start camera to begin.</p>
-        <p id="connectionHint" class="hint"></p>
-      </section>
-    </main>
+    canvas {
+      display: block;
+    }
 
-    <script type="module" src="./rebuild.js"></script>
-  </body>
+    #video {
+      position: fixed;
+      right: 16px;
+      bottom: 16px;
+      width: 200px;
+      border: 1px solid rgba(216, 231, 255, 0.15);
+      border-radius: 14px;
+      opacity: 0.22;
+      transform: scaleX(-1);
+      pointer-events: none;
+      filter: saturate(0.8) brightness(0.8);
+    }
+
+    .hud {
+      position: fixed;
+      left: 18px;
+      top: 18px;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: rgba(6, 12, 16, 0.48);
+      border: 1px solid rgba(216, 231, 255, 0.08);
+      color: var(--fg);
+      backdrop-filter: blur(14px);
+      max-width: min(360px, calc(100vw - 36px));
+      line-height: 1.45;
+    }
+
+    .hud strong {
+      display: block;
+      font-size: 13px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: white;
+      margin-bottom: 4px;
+    }
+
+    .hud span {
+      font-size: 14px;
+      color: rgba(216, 231, 255, 0.82);
+    }
+  </style>
+</head>
+<body>
+  <div class="hud">
+    <strong>Liquid Finger Ripple</strong>
+    <span>Allow camera access, then move your index finger to stir glowing ripples across the surface.</span>
+  </div>
+  <video id="video" playsinline autoplay muted></video>
+
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+  <script type="module">
+    import * as THREE from "https://unpkg.com/three@0.165.0/build/three.module.js";
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+    camera.position.z = 1;
+
+    const simScene = new THREE.Scene();
+    const simCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+    simCamera.position.z = 1;
+
+    const size = new THREE.Vector2(window.innerWidth, window.innerHeight);
+    const pointer = new THREE.Vector2(0.5, 0.5);
+    const smoothedPointer = new THREE.Vector2(0.5, 0.5);
+    const velocity = new THREE.Vector2(0, 0);
+    const lastPointer = new THREE.Vector2(0.5, 0.5);
+
+    let handDetected = false;
+    let lastDetectionTime = 0;
+
+    const video = document.getElementById("video");
+
+    const createTarget = () =>
+      new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        type: THREE.HalfFloatType,
+        depthBuffer: false,
+        stencilBuffer: false,
+      });
+
+    let currentTarget = createTarget();
+    let previousTarget = createTarget();
+
+    function primeTarget(target) {
+      const previousClearColor = renderer.getClearColor(new THREE.Color());
+      const previousClearAlpha = renderer.getClearAlpha();
+      renderer.setRenderTarget(target);
+      renderer.setClearColor(new THREE.Color(0.5, 0.5, 0.0), 1.0);
+      renderer.clear();
+      renderer.setRenderTarget(null);
+      renderer.setClearColor(previousClearColor, previousClearAlpha);
+    }
+
+    primeTarget(currentTarget);
+    primeTarget(previousTarget);
+
+    const plane = new THREE.PlaneGeometry(2, 2);
+
+    const simMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uPrevTexture: { value: previousTarget.texture },
+        uResolution: { value: size.clone() },
+        uTime: { value: 0 },
+        uDelta: { value: 0.016 },
+        uFingerPos: { value: smoothedPointer.clone() },
+        uVelocity: { value: velocity.clone() },
+        uActive: { value: 0 },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        precision highp float;
+
+        varying vec2 vUv;
+
+        uniform sampler2D uPrevTexture;
+        uniform vec2 uResolution;
+        uniform vec2 uFingerPos;
+        uniform vec2 uVelocity;
+        uniform float uTime;
+        uniform float uDelta;
+        uniform float uActive;
+
+        void main() {
+          vec2 uv = vUv;
+          vec2 texel = 1.0 / uResolution;
+
+          vec4 prev = texture2D(uPrevTexture, uv);
+          float prevHeight = prev.r - 0.5;
+
+          float left = texture2D(uPrevTexture, uv - vec2(texel.x, 0.0)).r - 0.5;
+          float right = texture2D(uPrevTexture, uv + vec2(texel.x, 0.0)).r - 0.5;
+          float down = texture2D(uPrevTexture, uv - vec2(0.0, texel.y)).r - 0.5;
+          float up = texture2D(uPrevTexture, uv + vec2(0.0, texel.y)).r - 0.5;
+
+          float averageHeight = (left + right + up + down) * 0.25;
+          float height = mix(prevHeight, averageHeight, 0.18);
+
+          vec2 finger = vec2(uFingerPos.x, 1.0 - uFingerPos.y);
+          vec2 toFinger = uv - finger;
+          float distanceToFinger = length(toFinger);
+          float speed = clamp(length(uVelocity) * 0.02, 0.0, 1.0);
+
+          float press = exp(-distanceToFinger * 44.0);
+          float rim = exp(-pow(max(distanceToFinger - 0.045, 0.0) * 28.0, 2.0));
+          float dent = -press * (0.12 + 0.25 * speed) * uActive;
+          float displacedRim = rim * (0.045 + 0.10 * speed) * uActive;
+
+          float wave = sin(distanceToFinger * 42.0 - uTime * (3.5 + speed * 2.0));
+          float wake = wave * exp(-distanceToFinger * 10.0) * (0.012 + speed * 0.022) * uActive;
+
+          height += dent + displacedRim + wake;
+          height *= 0.985;
+
+          gl_FragColor = vec4(height + 0.5, rim + wake * 8.0 + 0.5, press, 1.0);
+        }
+      `,
+    });
+
+    const displayMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uTexture: { value: currentTarget.texture },
+        uTime: { value: 0 },
+        uResolution: { value: size.clone() },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        precision highp float;
+
+        varying vec2 vUv;
+        uniform sampler2D uTexture;
+        uniform float uTime;
+        uniform vec2 uResolution;
+
+        void main() {
+          vec2 uv = vUv;
+          vec2 texel = 1.0 / uResolution;
+
+          vec4 centerSample = texture2D(uTexture, uv);
+          float centerHeight = centerSample.r - 0.5;
+
+          float left = texture2D(uTexture, uv - vec2(texel.x, 0.0)).r - 0.5;
+          float right = texture2D(uTexture, uv + vec2(texel.x, 0.0)).r - 0.5;
+          float down = texture2D(uTexture, uv - vec2(0.0, texel.y)).r - 0.5;
+          float up = texture2D(uTexture, uv + vec2(0.0, texel.y)).r - 0.5;
+
+          float dx = right - left;
+          float dy = up - down;
+          vec3 normal = normalize(vec3(-dx * 8.0, -dy * 8.0, 1.0));
+          float slope = length(vec2(dx, dy));
+
+          vec3 lightDir = normalize(vec3(-0.35, 0.5, 0.9));
+          vec3 viewDir = normalize(vec3(0.0, 0.0, 1.0));
+          vec3 halfVec = normalize(lightDir + viewDir);
+
+          float diffuse = max(dot(normal, lightDir), 0.0);
+          float specular = pow(max(dot(normal, halfVec), 0.0), 64.0);
+          float fresnel = pow(1.0 - max(dot(normal, viewDir), 0.0), 3.5);
+
+          vec2 refractUv = uv + normal.xy * 0.04;
+          float refractedHeight = texture2D(uTexture, refractUv).r - 0.5;
+
+          vec3 baseLiquid = vec3(0.01, 0.025, 0.04);
+          vec3 deepLiquid = vec3(0.03, 0.09, 0.14);
+          vec3 waterTint = vec3(0.42, 0.82, 1.0);
+          vec3 sparkle = vec3(0.92, 0.98, 1.0);
+
+          float pool = smoothstep(-0.16, 0.18, centerHeight + refractedHeight * 0.5);
+          float backgroundWave = sin((uv.x * 1.7 - uv.y * 1.1) * 9.0 + uTime * 0.18) * 0.5 + 0.5;
+          vec3 liquidBody = mix(baseLiquid, deepLiquid, clamp(pool * 0.9 + backgroundWave * 0.04, 0.0, 1.0));
+
+          float cavity = smoothstep(0.22, -0.08, centerHeight);
+          float rimGlow = smoothstep(0.015, 0.13, centerHeight + centerSample.b * 0.22);
+          float sheen = smoothstep(0.01, 0.09, slope + abs(centerHeight) * 0.35 + rimGlow * 0.2);
+          float transparency = smoothstep(0.18, -0.12, centerHeight);
+
+          vec3 color = liquidBody;
+          color += waterTint * diffuse * sheen * (0.05 + rimGlow * 0.14);
+          color += sparkle * specular * (0.85 + sheen * 0.55 + rimGlow * 0.25);
+          color += vec3(0.72, 0.9, 1.0) * fresnel * (0.08 + sheen * 0.15);
+          color += vec3(0.04, 0.11, 0.16) * cavity * 0.12;
+          color = mix(color, liquidBody * 0.55 + vec3(0.02, 0.05, 0.08), transparency * 0.18);
+
+          float vignette = smoothstep(1.1, 0.2, distance(uv, vec2(0.5)));
+          color *= 0.7 + vignette * 0.3;
+
+          color = 1.0 - exp(-color * 1.35);
+          gl_FragColor = vec4(color, 1.0);
+        }
+      `,
+    });
+
+    const simMesh = new THREE.Mesh(plane, simMaterial);
+    const displayMesh = new THREE.Mesh(plane, displayMaterial);
+    simScene.add(simMesh);
+    scene.add(displayMesh);
+
+    const clock = new THREE.Clock();
+
+    function swapTargets() {
+      const tmp = previousTarget;
+      previousTarget = currentTarget;
+      currentTarget = tmp;
+      simMaterial.uniforms.uPrevTexture.value = previousTarget.texture;
+      displayMaterial.uniforms.uTexture.value = currentTarget.texture;
+    }
+
+    function resize() {
+      size.set(window.innerWidth, window.innerHeight);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+      currentTarget.dispose();
+      previousTarget.dispose();
+      currentTarget = createTarget();
+      previousTarget = createTarget();
+      primeTarget(currentTarget);
+      primeTarget(previousTarget);
+
+      simMaterial.uniforms.uPrevTexture.value = previousTarget.texture;
+      simMaterial.uniforms.uResolution.value.copy(size);
+      displayMaterial.uniforms.uTexture.value = currentTarget.texture;
+      displayMaterial.uniforms.uResolution.value.copy(size);
+    }
+
+    window.addEventListener("resize", resize);
+
+    window.addEventListener("pointermove", (event) => {
+      if (handDetected) return;
+      pointer.set(event.clientX / window.innerWidth, event.clientY / window.innerHeight);
+    });
+
+    async function setupHands() {
+      const hands = new window.Hands({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
+      });
+
+      hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.65,
+        minTrackingConfidence: 0.65,
+      });
+
+      hands.onResults((results) => {
+        const landmarks = results.multiHandLandmarks?.[0];
+
+        if (landmarks?.[8]) {
+          const tip = landmarks[8];
+          pointer.set(1.0 - tip.x, tip.y);
+          handDetected = true;
+          lastDetectionTime = performance.now();
+        } else if (performance.now() - lastDetectionTime > 250) {
+          handDetected = false;
+        }
+      });
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+          facingMode: "user",
+        },
+        audio: false,
+      });
+
+      video.srcObject = stream;
+      await video.play();
+
+      let sending = false;
+      const processFrame = async () => {
+        if (video.readyState >= 2 && !sending) {
+          sending = true;
+          try {
+            await hands.send({ image: video });
+          } finally {
+            sending = false;
+          }
+        }
+        requestAnimationFrame(processFrame);
+      };
+
+      processFrame();
+    }
+
+    setupHands().catch((error) => {
+      console.error(error);
+      document.querySelector(".hud span").textContent =
+        "Camera access was blocked or unavailable. Move your pointer to preview the ripple effect instead.";
+    });
+
+    function animate() {
+      const delta = Math.min(clock.getDelta(), 0.033);
+      const elapsed = clock.elapsedTime;
+
+      smoothedPointer.lerp(pointer, 1.0 - Math.pow(0.08, delta * 60.0));
+      velocity.copy(smoothedPointer).sub(lastPointer).multiplyScalar(1.0 / Math.max(delta, 0.001));
+      lastPointer.copy(smoothedPointer);
+
+      simMaterial.uniforms.uTime.value = elapsed;
+      simMaterial.uniforms.uDelta.value = delta;
+      simMaterial.uniforms.uFingerPos.value.copy(smoothedPointer);
+      simMaterial.uniforms.uVelocity.value.copy(velocity);
+      simMaterial.uniforms.uActive.value = handDetected ? 1.0 : 0.8;
+
+      displayMaterial.uniforms.uTime.value = elapsed;
+
+      renderer.setRenderTarget(currentTarget);
+      renderer.render(simScene, simCamera);
+      renderer.setRenderTarget(null);
+      renderer.render(scene, camera);
+
+      swapTargets();
+      requestAnimationFrame(animate);
+    }
+
+    animate();
+  </script>
+</body>
 </html>
