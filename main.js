@@ -159,6 +159,25 @@ function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
+function lerp(start, end, amount) {
+  return start + (end - start) * amount;
+}
+
+function fract(value) {
+  return value - Math.floor(value);
+}
+
+function hashNoise(value) {
+  return fract(Math.sin(value * 127.1 + 311.7) * 43758.5453123);
+}
+
+function smoothNoise1D(value) {
+  const base = Math.floor(value);
+  const progress = value - base;
+  const eased = progress * progress * (3 - 2 * progress);
+  return lerp(hashNoise(base), hashNoise(base + 1), eased) * 2 - 1;
+}
+
 function getPointDistance(a, b) {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
@@ -245,11 +264,30 @@ function traceSmoothPath(context, points) {
   context.lineTo(last.x, last.y);
 }
 
-function buildRibbonOutline(points) {
+function scaleRibbonPoints(points, widthScale = 1, strengthBoost = 1) {
+  return points.map((point, index) => {
+    const tailFade = 1 - index / Math.max(1, points.length - 1);
+    return {
+      ...point,
+      strength: point.strength * strengthBoost * (0.72 + tailFade * widthScale * 0.42),
+    };
+  });
+}
+
+function buildRibbonOutline(points, options = {}) {
   if (points.length < 2) {
     return null;
   }
 
+  const {
+    baseWidth = 10,
+    tailWidth = 13,
+    strengthWidth = 7,
+    flutterStrength = 1.1,
+    flutterFrequency = 0.42,
+    noiseOffset = 0,
+    time = performance.now() * 0.001,
+  } = options;
   const leftEdge = [];
   const rightEdge = [];
   const lastIndex = points.length - 1;
@@ -265,8 +303,10 @@ function buildRibbonOutline(points) {
     const normalX = -tangentY;
     const normalY = tangentX;
     const tailFade = 1 - index / Math.max(1, lastIndex);
-    const width = 10 + tailFade * 13 + point.strength * 7;
-    const flutter = Math.sin(index * 0.9) * (1.2 + tailFade * 1.6);
+    const width = baseWidth + tailFade * tailWidth + point.strength * strengthWidth;
+    const noiseValue = smoothNoise1D(index * flutterFrequency + time * 0.75 + noiseOffset)
+      + smoothNoise1D(index * flutterFrequency * 2.1 + time * 0.43 + noiseOffset * 1.7) * 0.45;
+    const flutter = noiseValue * flutterStrength * (0.55 + tailFade * 1.2);
     const halfWidth = width + flutter;
 
     leftEdge.push({
@@ -285,8 +325,8 @@ function buildRibbonOutline(points) {
   };
 }
 
-function traceRibbonShape(context, points) {
-  const outline = buildRibbonOutline(points);
+function traceRibbonShape(context, points, options = {}) {
+  const outline = buildRibbonOutline(points, options);
   if (!outline) {
     return false;
   }
@@ -355,7 +395,11 @@ function drawRefractionLayer(targetCtx, sourceCanvas, drawLayer) {
 
   liquidCtx.globalAlpha = 1;
   liquidCtx.globalCompositeOperation = "source-over";
+  targetCtx.save();
+  targetCtx.globalCompositeOperation = drawLayer.composite ?? "source-over";
+  targetCtx.globalAlpha = drawLayer.layerAlpha ?? 1;
   targetCtx.drawImage(liquidCanvas, 0, 0);
+  targetCtx.restore();
 }
 
 function traceWakeFront(context, wake, age, scale = 1) {
@@ -407,59 +451,118 @@ function renderTrailBody(trail, hasCameraFrame) {
   const motion = Math.max(1, getPointDistance(head, previous));
   const speed = clamp(motion / 18, 0, 1);
   const bodyWidth = 22 + head.strength * 8 + speed * 15;
-
-  const renderRibbon = (alpha, widthScale, shiftScale, blurAmount) => drawRefractionLayer(ctx, hasCameraFrame ? refractionCanvas : null, {
-    alpha,
-    blur: blurAmount,
-    shiftX: (head.x - previous.x) * shiftScale,
-    shiftY: (head.y - previous.y) * shiftScale,
+  const time = performance.now() * 0.001;
+  const renderRibbon = (layer) => drawRefractionLayer(ctx, hasCameraFrame ? refractionCanvas : null, {
+    composite: layer.composite,
+    layerAlpha: layer.layerAlpha,
+    alpha: layer.alpha,
+    blur: layer.blur,
+    shiftX: (head.x - previous.x) * layer.shiftScale,
+    shiftY: (head.y - previous.y) * layer.shiftScale,
     mask: (maskCtx) => {
       maskCtx.save();
       maskCtx.fillStyle = "#fff";
-      const scaledPoints = livePoints.map((point, index) => {
-        const tailFade = 1 - index / Math.max(1, livePoints.length - 1);
-        return {
-          ...point,
-          strength: point.strength * widthScale * (0.7 + tailFade * 0.55),
-        };
-      });
-      if (traceRibbonShape(maskCtx, scaledPoints)) {
+      const scaledPoints = scaleRibbonPoints(livePoints, layer.widthScale, layer.strengthBoost);
+      if (traceRibbonShape(maskCtx, scaledPoints, {
+        baseWidth: layer.baseWidth,
+        tailWidth: layer.tailWidth,
+        strengthWidth: layer.strengthWidth,
+        flutterStrength: layer.flutterStrength,
+        flutterFrequency: layer.flutterFrequency,
+        noiseOffset: layer.noiseOffset,
+        time,
+      })) {
         maskCtx.fill();
       }
       maskCtx.beginPath();
-      maskCtx.arc(head.x, head.y, bodyWidth * 0.42 * widthScale, 0, Math.PI * 2);
+      maskCtx.arc(head.x, head.y, bodyWidth * layer.headScale, 0, Math.PI * 2);
       maskCtx.fill();
       maskCtx.restore();
     },
     fallback: (maskCtx) => {
       const fill = maskCtx.createLinearGradient(head.x - 72, head.y - 72, head.x + 92, head.y + 92);
-      fill.addColorStop(0, `rgba(255, 255, 255, ${0.12 * alpha})`);
-      fill.addColorStop(0.48, `rgba(188, 214, 228, ${0.28 * alpha})`);
-      fill.addColorStop(1, `rgba(255, 255, 255, ${0.08 * alpha})`);
+      fill.addColorStop(0, layer.fallbackStart);
+      fill.addColorStop(0.52, layer.fallbackMid);
+      fill.addColorStop(1, layer.fallbackEnd);
       maskCtx.fillStyle = fill;
       maskCtx.fillRect(0, 0, width, height);
     },
   });
 
-  renderRibbon(0.48, 1.0, 0.28, 0.2);
-  renderRibbon(0.24, 1.22, -0.1, 1.1);
-  renderRibbon(0.12, 1.46, 0.05, 2.2);
+  renderRibbon({
+    composite: "multiply",
+    layerAlpha: 0.62,
+    alpha: 0.96,
+    blur: 1.6,
+    shiftScale: -0.16,
+    widthScale: 1.12,
+    strengthBoost: 1.18,
+    baseWidth: 12,
+    tailWidth: 16,
+    strengthWidth: 8.5,
+    flutterStrength: 0.78,
+    flutterFrequency: 0.36,
+    noiseOffset: 1.8,
+    headScale: 0.34,
+    fallbackStart: "rgba(10, 18, 28, 0.24)",
+    fallbackMid: "rgba(20, 34, 48, 0.42)",
+    fallbackEnd: "rgba(8, 14, 22, 0.2)",
+  });
+  renderRibbon({
+    composite: "screen",
+    layerAlpha: 0.52,
+    alpha: 0.34,
+    blur: 0.45,
+    shiftScale: 0.18,
+    widthScale: 0.92,
+    strengthBoost: 0.92,
+    baseWidth: 8,
+    tailWidth: 11,
+    strengthWidth: 5.8,
+    flutterStrength: 0.42,
+    flutterFrequency: 0.4,
+    noiseOffset: 8.4,
+    headScale: 0.21,
+    fallbackStart: "rgba(255, 255, 255, 0.08)",
+    fallbackMid: "rgba(190, 214, 228, 0.18)",
+    fallbackEnd: "rgba(255, 255, 255, 0.04)",
+  });
 
   ctx.save();
-  ctx.globalCompositeOperation = "screen";
-  ctx.fillStyle = "rgba(255, 255, 255, 0.08)";
-  if (traceRibbonShape(ctx, livePoints)) {
+  ctx.globalCompositeOperation = "multiply";
+  ctx.fillStyle = "rgba(8, 18, 30, 0.2)";
+  if (traceRibbonShape(ctx, scaleRibbonPoints(livePoints, 1.04, 1.05), {
+    baseWidth: 11,
+    tailWidth: 15,
+    strengthWidth: 8,
+    flutterStrength: 0.52,
+    flutterFrequency: 0.38,
+    noiseOffset: 4.2,
+    time,
+  })) {
     ctx.fill();
   }
-  ctx.strokeStyle = "rgba(235, 246, 252, 0.24)";
-  ctx.lineWidth = Math.max(0.8, bodyWidth * 0.08);
+  ctx.restore();
+
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  ctx.strokeStyle = "rgba(238, 247, 255, 0.32)";
+  ctx.lineWidth = Math.max(0.8, bodyWidth * 0.065);
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
   traceSmoothPath(ctx, livePoints);
   ctx.stroke();
-  ctx.fillStyle = "rgba(255, 242, 234, 0.28)";
+
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
+  ctx.lineWidth = Math.max(1.2, bodyWidth * 0.12);
+  ctx.filter = "blur(2px)";
+  traceSmoothPath(ctx, livePoints);
+  ctx.stroke();
+  ctx.filter = "none";
+
+  ctx.fillStyle = "rgba(246, 250, 255, 0.22)";
   ctx.beginPath();
-  ctx.arc(head.x, head.y, bodyWidth * 0.22, 0, Math.PI * 2);
+  ctx.arc(head.x, head.y, bodyWidth * 0.18, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
 }
@@ -472,12 +575,14 @@ function renderTrailWake(trail, now, hasCameraFrame) {
     return;
   }
 
-  const renderShell = (alpha, scale, blurAmount, shiftX, shiftY) => {
+  const renderShell = (layer) => {
     drawRefractionLayer(ctx, hasCameraFrame ? refractionCanvas : null, {
-      alpha,
-      blur: blurAmount,
-      shiftX,
-      shiftY,
+      composite: layer.composite,
+      layerAlpha: layer.layerAlpha,
+      alpha: layer.alpha,
+      blur: layer.blur,
+      shiftX: layer.shiftX,
+      shiftY: layer.shiftY,
       mask: (maskCtx) => {
         maskCtx.save();
         maskCtx.strokeStyle = "#fff";
@@ -486,37 +591,65 @@ function renderTrailWake(trail, now, hasCameraFrame) {
         for (const wake of visibleWakes) {
           const age = now - wake.createdAt;
           const progress = clamp(age / 1650, 0, 1);
-          maskCtx.globalAlpha = Math.sin(progress * Math.PI) * 0.18;
-          maskCtx.lineWidth = (11 - progress * 7) * scale;
-          traceWakeFront(maskCtx, wake, age, scale);
+          maskCtx.globalAlpha = Math.sin(progress * Math.PI) * layer.fade;
+          maskCtx.lineWidth = (layer.lineWidth - progress * layer.lineDecay) * layer.scale;
+          traceWakeFront(maskCtx, wake, age, layer.scale);
           maskCtx.stroke();
         }
         maskCtx.restore();
       },
       fallback: (maskCtx, width, height) => {
         const fill = maskCtx.createLinearGradient(0, 0, width, height);
-        fill.addColorStop(0, "rgba(170, 202, 220, 0.2)");
-        fill.addColorStop(0.48, "rgba(255, 255, 255, 0.42)");
-        fill.addColorStop(1, "rgba(126, 162, 185, 0.18)");
+        fill.addColorStop(0, layer.fallbackStart);
+        fill.addColorStop(0.48, layer.fallbackMid);
+        fill.addColorStop(1, layer.fallbackEnd);
         maskCtx.fillStyle = fill;
         maskCtx.fillRect(0, 0, width, height);
       },
     });
   };
 
-  renderShell(0.12, 1, 0.4, 2, 1);
-  renderShell(0.06, 1.03, 1.2, -1, -1);
+  renderShell({
+    composite: "multiply",
+    layerAlpha: 0.3,
+    alpha: 0.72,
+    blur: 1.8,
+    shiftX: -2,
+    shiftY: 1,
+    scale: 1.08,
+    fade: 0.18,
+    lineWidth: 13,
+    lineDecay: 8,
+    fallbackStart: "rgba(14, 22, 34, 0.18)",
+    fallbackMid: "rgba(24, 34, 46, 0.28)",
+    fallbackEnd: "rgba(10, 16, 24, 0.12)",
+  });
+  renderShell({
+    composite: "screen",
+    layerAlpha: 0.16,
+    alpha: 0.28,
+    blur: 0.9,
+    shiftX: 1,
+    shiftY: -1,
+    scale: 1,
+    fade: 0.11,
+    lineWidth: 8,
+    lineDecay: 5.5,
+    fallbackStart: "rgba(215, 230, 240, 0.08)",
+    fallbackMid: "rgba(255, 255, 255, 0.18)",
+    fallbackEnd: "rgba(190, 214, 228, 0.06)",
+  });
 
   ctx.save();
-  ctx.globalCompositeOperation = "screen";
+  ctx.globalCompositeOperation = "lighter";
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
   for (const wake of visibleWakes) {
     const age = now - wake.createdAt;
     const progress = clamp(age / 1650, 0, 1);
-    ctx.globalAlpha = Math.sin(progress * Math.PI) * 0.08;
-    ctx.strokeStyle = "rgba(235, 247, 255, 0.72)";
-    ctx.lineWidth = Math.max(0.6, 1.5 - progress * 0.9);
+    ctx.globalAlpha = Math.sin(progress * Math.PI) * 0.06;
+    ctx.strokeStyle = "rgba(240, 248, 255, 0.78)";
+    ctx.lineWidth = Math.max(0.5, 1.1 - progress * 0.7);
     traceWakeFront(ctx, wake, age, 1);
     ctx.stroke();
   }
@@ -530,8 +663,6 @@ function animateRipples() {
   drawBackground(width, height);
 
   const hasCameraFrame = updateRefractionFrame(width, height);
-  ctx.save();
-  ctx.globalCompositeOperation = "screen";
 
   for (const [id, trail] of trails) {
     const segments = trail.points.length - 1;
@@ -558,8 +689,6 @@ function animateRipples() {
       }
     }
   }
-
-  ctx.restore();
   requestAnimationFrame(animateRipples);
 }
 
