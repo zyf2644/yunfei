@@ -6,10 +6,9 @@
   <title>Liquid Finger Ripple</title>
   <style>
     :root {
-      color-scheme: dark; 
-      --bg: #02070c;
-      --fg: #d8e7ff;
-      --accent: #63d7ff;
+      color-scheme: dark;
+      --bg: #04101a;
+      --fg: #d9ebff;
     }
 
     * {
@@ -23,8 +22,8 @@
       height: 100%;
       overflow: hidden;
       background:
-        radial-gradient(circle at top, rgba(72, 133, 172, 0.16), transparent 42%),
-        radial-gradient(circle at bottom, rgba(12, 56, 78, 0.22), transparent 48%),
+        radial-gradient(circle at top, rgba(114, 186, 226, 0.12), transparent 42%),
+        radial-gradient(circle at bottom, rgba(7, 52, 88, 0.22), transparent 48%),
         var(--bg);
       font-family: "Segoe UI", system-ui, sans-serif;
     }
@@ -37,13 +36,13 @@
       position: fixed;
       right: 16px;
       bottom: 16px;
-      width: 200px;
-      border: 1px solid rgba(216, 231, 255, 0.15);
+      width: 180px;
+      border: 1px solid rgba(217, 235, 255, 0.12);
       border-radius: 14px;
-      opacity: 0.22;
+      opacity: 0.18;
       transform: scaleX(-1);
       pointer-events: none;
-      filter: saturate(0.8) brightness(0.8);
+      filter: saturate(0.8) brightness(0.85);
     }
 
     .hud {
@@ -52,8 +51,8 @@
       top: 18px;
       padding: 12px 14px;
       border-radius: 14px;
-      background: rgba(6, 12, 16, 0.48);
-      border: 1px solid rgba(216, 231, 255, 0.08);
+      background: rgba(6, 14, 22, 0.44);
+      border: 1px solid rgba(217, 235, 255, 0.08);
       color: var(--fg);
       backdrop-filter: blur(14px);
       max-width: min(360px, calc(100vw - 36px));
@@ -71,14 +70,14 @@
 
     .hud span {
       font-size: 14px;
-      color: rgba(216, 231, 255, 0.82);
+      color: rgba(217, 235, 255, 0.82);
     }
   </style>
 </head>
 <body>
   <div class="hud">
     <strong>Liquid Finger Ripple</strong>
-    <span>Allow camera access, then move your index finger to stir glowing ripples across the surface.</span>
+    <span>Allow camera access, then move your index finger to stir transparent water ripples across the surface.</span>
   </div>
   <video id="video" playsinline autoplay muted></video>
 
@@ -99,53 +98,106 @@
     const simCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
     simCamera.position.z = 1;
 
+    const plane = new THREE.PlaneGeometry(2, 2);
+    const clock = new THREE.Clock();
+
     const size = new THREE.Vector2(window.innerWidth, window.innerHeight);
+    const texelSize = new THREE.Vector2(1 / window.innerWidth, 1 / window.innerHeight);
     const pointer = new THREE.Vector2(0.5, 0.5);
-    const smoothedPointer = new THREE.Vector2(0.5, 0.5);
-    const velocity = new THREE.Vector2(0, 0);
+    const rawPointer = new THREE.Vector2(0.5, 0.5);
+    const velocity = new THREE.Vector2();
     const lastPointer = new THREE.Vector2(0.5, 0.5);
+
+    const video = document.getElementById("video");
 
     let handDetected = false;
     let lastDetectionTime = 0;
 
-    const video = document.getElementById("video");
-
-    const createTarget = () =>
-      new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, {
+    function createTarget() {
+      return new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, {
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
         type: THREE.HalfFloatType,
         depthBuffer: false,
         stencilBuffer: false,
       });
-
-    let currentTarget = createTarget();
-    let previousTarget = createTarget();
-
-    function primeTarget(target) {
-      const previousClearColor = renderer.getClearColor(new THREE.Color());
-      const previousClearAlpha = renderer.getClearAlpha();
-      renderer.setRenderTarget(target);
-      renderer.setClearColor(new THREE.Color(0.5, 0.5, 0.0), 1.0);
-      renderer.clear();
-      renderer.setRenderTarget(null);
-      renderer.setClearColor(previousClearColor, previousClearAlpha);
     }
 
-    primeTarget(currentTarget);
-    primeTarget(previousTarget);
+    let prevTarget = createTarget();
+    let currTarget = createTarget();
+    let nextTarget = createTarget();
 
-    const plane = new THREE.PlaneGeometry(2, 2);
+    function clearTarget(target) {
+      const previousColor = renderer.getClearColor(new THREE.Color());
+      const previousAlpha = renderer.getClearAlpha();
+      renderer.setRenderTarget(target);
+      renderer.setClearColor(new THREE.Color(0, 0, 0), 1);
+      renderer.clear();
+      renderer.setRenderTarget(null);
+      renderer.setClearColor(previousColor, previousAlpha);
+    }
+
+    clearTarget(prevTarget);
+    clearTarget(currTarget);
+    clearTarget(nextTarget);
+
+    const backgroundCanvas = document.createElement("canvas");
+    const backgroundContext = backgroundCanvas.getContext("2d");
+    const backgroundTexture = new THREE.CanvasTexture(backgroundCanvas);
+    backgroundTexture.wrapS = THREE.ClampToEdgeWrapping;
+    backgroundTexture.wrapT = THREE.ClampToEdgeWrapping;
+    backgroundTexture.minFilter = THREE.LinearFilter;
+    backgroundTexture.magFilter = THREE.LinearFilter;
+
+    function paintBackground() {
+      const width = Math.max(256, Math.floor(window.innerWidth));
+      const height = Math.max(256, Math.floor(window.innerHeight));
+
+      backgroundCanvas.width = width;
+      backgroundCanvas.height = height;
+
+      const gradient = backgroundContext.createLinearGradient(0, 0, 0, height);
+      gradient.addColorStop(0, "#15324b");
+      gradient.addColorStop(0.45, "#0a1e31");
+      gradient.addColorStop(1, "#050d15");
+      backgroundContext.fillStyle = gradient;
+      backgroundContext.fillRect(0, 0, width, height);
+
+      const glow = backgroundContext.createRadialGradient(width * 0.52, height * 0.24, width * 0.05, width * 0.52, height * 0.24, width * 0.62);
+      glow.addColorStop(0, "rgba(180, 230, 255, 0.35)");
+      glow.addColorStop(0.2, "rgba(110, 180, 220, 0.22)");
+      glow.addColorStop(1, "rgba(0, 0, 0, 0)");
+      backgroundContext.fillStyle = glow;
+      backgroundContext.fillRect(0, 0, width, height);
+
+      backgroundContext.strokeStyle = "rgba(190, 225, 255, 0.06)";
+      backgroundContext.lineWidth = Math.max(1, width * 0.0012);
+      for (let i = 0; i < 7; i += 1) {
+        const y = height * (0.18 + i * 0.12);
+        backgroundContext.beginPath();
+        backgroundContext.moveTo(0, y);
+        for (let x = 0; x <= width; x += 24) {
+          const wave = Math.sin(x * 0.008 + i * 0.75) * height * 0.012;
+          backgroundContext.lineTo(x, y + wave);
+        }
+        backgroundContext.stroke();
+      }
+
+      backgroundTexture.needsUpdate = true;
+    }
+
+    paintBackground();
 
     const simMaterial = new THREE.ShaderMaterial({
       uniforms: {
-        uPrevTexture: { value: previousTarget.texture },
-        uResolution: { value: size.clone() },
-        uTime: { value: 0 },
-        uDelta: { value: 0.016 },
-        uFingerPos: { value: smoothedPointer.clone() },
-        uVelocity: { value: velocity.clone() },
-        uActive: { value: 0 },
+        uCurrTexture: { value: currTarget.texture },
+        uPrevTexture: { value: prevTarget.texture },
+        uTexelSize: { value: texelSize.clone() },
+        uFingerPos: { value: pointer.clone() },
+        uFingerVelocity: { value: velocity.clone() },
+        uWaveSpeed: { value: 0.24 },
+        uDamping: { value: 0.995 },
+        uActive: { value: 0.0 },
       },
       vertexShader: `
         varying vec2 vUv;
@@ -160,55 +212,52 @@
 
         varying vec2 vUv;
 
+        uniform sampler2D uCurrTexture;
         uniform sampler2D uPrevTexture;
-        uniform vec2 uResolution;
+        uniform vec2 uTexelSize;
         uniform vec2 uFingerPos;
-        uniform vec2 uVelocity;
-        uniform float uTime;
-        uniform float uDelta;
+        uniform vec2 uFingerVelocity;
+        uniform float uWaveSpeed;
+        uniform float uDamping;
         uniform float uActive;
 
         void main() {
           vec2 uv = vUv;
-          vec2 texel = 1.0 / uResolution;
-
-          vec4 prev = texture2D(uPrevTexture, uv);
-          float prevHeight = prev.r - 0.5;
-
-          float left = texture2D(uPrevTexture, uv - vec2(texel.x, 0.0)).r - 0.5;
-          float right = texture2D(uPrevTexture, uv + vec2(texel.x, 0.0)).r - 0.5;
-          float down = texture2D(uPrevTexture, uv - vec2(0.0, texel.y)).r - 0.5;
-          float up = texture2D(uPrevTexture, uv + vec2(0.0, texel.y)).r - 0.5;
-
-          float averageHeight = (left + right + up + down) * 0.25;
-          float height = mix(prevHeight, averageHeight, 0.18);
+          float curr = texture2D(uCurrTexture, uv).r;
+          float prev = texture2D(uPrevTexture, uv).r;
 
           vec2 finger = vec2(uFingerPos.x, 1.0 - uFingerPos.y);
-          vec2 toFinger = uv - finger;
-          float distanceToFinger = length(toFinger);
-          float speed = clamp(length(uVelocity) * 0.02, 0.0, 1.0);
+          vec2 offset = uv - finger;
+          float dist = length(offset);
+          float speed = clamp(length(uFingerVelocity) * 0.02, 0.0, 1.0);
 
-          float press = exp(-distanceToFinger * 44.0);
-          float rim = exp(-pow(max(distanceToFinger - 0.045, 0.0) * 28.0, 2.0));
-          float dent = -press * (0.12 + 0.25 * speed) * uActive;
-          float displacedRim = rim * (0.045 + 0.10 * speed) * uActive;
+          float press = exp(-dist * 42.0);
+          float ring = exp(-pow(max(dist - 0.028, 0.0) * 42.0, 2.0));
+          float disturbance = (-press * 0.05 + ring * (0.015 + speed * 0.03)) * uActive;
+          curr += disturbance;
 
-          float wave = sin(distanceToFinger * 42.0 - uTime * (3.5 + speed * 2.0));
-          float wake = wave * exp(-distanceToFinger * 10.0) * (0.012 + speed * 0.022) * uActive;
+          float left = texture2D(uCurrTexture, uv - vec2(uTexelSize.x, 0.0)).r;
+          float right = texture2D(uCurrTexture, uv + vec2(uTexelSize.x, 0.0)).r;
+          float down = texture2D(uCurrTexture, uv - vec2(0.0, uTexelSize.y)).r;
+          float up = texture2D(uCurrTexture, uv + vec2(0.0, uTexelSize.y)).r;
+          float laplacian = (left + right + up + down) - 4.0 * curr;
 
-          height += dent + displacedRim + wake;
-          height *= 0.985;
+          // True second-order wave propagation so energy travels outward.
+          float next = 2.0 * curr - prev + uWaveSpeed * laplacian;
+          next *= uDamping;
 
-          gl_FragColor = vec4(height + 0.5, rim + wake * 8.0 + 0.5, press, 1.0);
+          gl_FragColor = vec4(next, 0.0, 0.0, 1.0);
         }
       `,
     });
 
     const displayMaterial = new THREE.ShaderMaterial({
       uniforms: {
-        uTexture: { value: currentTarget.texture },
-        uTime: { value: 0 },
+        uTexture: { value: currTarget.texture },
+        uBackgroundTexture: { value: backgroundTexture },
         uResolution: { value: size.clone() },
+        uTime: { value: 0 },
+        uBumpStrength: { value: 3.4 },
       },
       vertexShader: `
         varying vec2 vUv;
@@ -222,64 +271,52 @@
         precision highp float;
 
         varying vec2 vUv;
+
         uniform sampler2D uTexture;
-        uniform float uTime;
+        uniform sampler2D uBackgroundTexture;
         uniform vec2 uResolution;
+        uniform float uTime;
+        uniform float uBumpStrength;
 
         void main() {
           vec2 uv = vUv;
           vec2 texel = 1.0 / uResolution;
 
-          vec4 centerSample = texture2D(uTexture, uv);
-          float centerHeight = centerSample.r - 0.5;
-
-          float left = texture2D(uTexture, uv - vec2(texel.x, 0.0)).r - 0.5;
-          float right = texture2D(uTexture, uv + vec2(texel.x, 0.0)).r - 0.5;
-          float down = texture2D(uTexture, uv - vec2(0.0, texel.y)).r - 0.5;
-          float up = texture2D(uTexture, uv + vec2(0.0, texel.y)).r - 0.5;
+          float center = texture2D(uTexture, uv).r;
+          float left = texture2D(uTexture, uv - vec2(texel.x, 0.0)).r;
+          float right = texture2D(uTexture, uv + vec2(texel.x, 0.0)).r;
+          float down = texture2D(uTexture, uv - vec2(0.0, texel.y)).r;
+          float up = texture2D(uTexture, uv + vec2(0.0, texel.y)).r;
 
           float dx = right - left;
           float dy = up - down;
-          vec3 normal = normalize(vec3(-dx * 8.0, -dy * 8.0, 1.0));
-          float slope = length(vec2(dx, dy));
 
-          vec3 lightDir = normalize(vec3(-0.35, 0.5, 0.9));
+          // A restrained bump scale keeps the surface watery instead of jagged.
+          vec3 normal = normalize(vec3(-dx * uBumpStrength, -dy * uBumpStrength, 1.0));
+          vec3 lightDir = normalize(vec3(-0.4, 0.6, 0.75));
           vec3 viewDir = normalize(vec3(0.0, 0.0, 1.0));
           vec3 halfVec = normalize(lightDir + viewDir);
 
           float diffuse = max(dot(normal, lightDir), 0.0);
-          float specular = pow(max(dot(normal, halfVec), 0.0), 64.0);
-          float fresnel = pow(1.0 - max(dot(normal, viewDir), 0.0), 3.5);
+          float spec = pow(max(dot(normal, halfVec), 0.0), 128.0);
+          float fresnel = pow(1.0 - max(dot(normal, viewDir), 0.0), 4.0);
 
-          vec2 refractUv = uv + normal.xy * 0.04;
-          float refractedHeight = texture2D(uTexture, refractUv).r - 0.5;
+          vec2 refractUV = clamp(uv + normal.xy * 0.03, 0.0, 1.0);
+          vec3 bgColor = texture2D(uBackgroundTexture, refractUV).rgb;
 
-          vec3 baseLiquid = vec3(0.01, 0.025, 0.04);
-          vec3 deepLiquid = vec3(0.03, 0.09, 0.14);
-          vec3 waterTint = vec3(0.42, 0.82, 1.0);
-          vec3 sparkle = vec3(0.92, 0.98, 1.0);
+          vec3 waterBase = vec3(0.0, 0.1, 0.15);
+          vec3 envColor = vec3(0.4, 0.6, 0.8);
+          vec3 refractedWater = mix(bgColor, vec3(0.1, 0.4, 0.6), 0.2 + fresnel * 0.5);
+          vec3 finalColor = mix(waterBase, envColor, fresnel);
+          finalColor = mix(finalColor, refractedWater, 0.72);
+          finalColor += diffuse * vec3(0.03, 0.08, 0.12);
+          finalColor += spec * vec3(1.0, 0.95, 0.9);
 
-          float pool = smoothstep(-0.16, 0.18, centerHeight + refractedHeight * 0.5);
-          float backgroundWave = sin((uv.x * 1.7 - uv.y * 1.1) * 9.0 + uTime * 0.18) * 0.5 + 0.5;
-          vec3 liquidBody = mix(baseLiquid, deepLiquid, clamp(pool * 0.9 + backgroundWave * 0.04, 0.0, 1.0));
+          float depthTint = smoothstep(-0.02, 0.09, center);
+          finalColor = mix(finalColor, finalColor + vec3(0.0, 0.05, 0.08), depthTint * 0.12);
 
-          float cavity = smoothstep(0.22, -0.08, centerHeight);
-          float rimGlow = smoothstep(0.015, 0.13, centerHeight + centerSample.b * 0.22);
-          float sheen = smoothstep(0.01, 0.09, slope + abs(centerHeight) * 0.35 + rimGlow * 0.2);
-          float transparency = smoothstep(0.18, -0.12, centerHeight);
-
-          vec3 color = liquidBody;
-          color += waterTint * diffuse * sheen * (0.05 + rimGlow * 0.14);
-          color += sparkle * specular * (0.85 + sheen * 0.55 + rimGlow * 0.25);
-          color += vec3(0.72, 0.9, 1.0) * fresnel * (0.08 + sheen * 0.15);
-          color += vec3(0.04, 0.11, 0.16) * cavity * 0.12;
-          color = mix(color, liquidBody * 0.55 + vec3(0.02, 0.05, 0.08), transparency * 0.18);
-
-          float vignette = smoothstep(1.1, 0.2, distance(uv, vec2(0.5)));
-          color *= 0.7 + vignette * 0.3;
-
-          color = 1.0 - exp(-color * 1.35);
-          gl_FragColor = vec4(color, 1.0);
+          finalColor = 1.0 - exp(-finalColor * 1.2);
+          gl_FragColor = vec4(finalColor, 1.0);
         }
       `,
     });
@@ -289,39 +326,51 @@
     simScene.add(simMesh);
     scene.add(displayMesh);
 
-    const clock = new THREE.Clock();
+    function rotateTargets() {
+      const temp = prevTarget;
+      prevTarget = currTarget;
+      currTarget = nextTarget;
+      nextTarget = temp;
 
-    function swapTargets() {
-      const tmp = previousTarget;
-      previousTarget = currentTarget;
-      currentTarget = tmp;
-      simMaterial.uniforms.uPrevTexture.value = previousTarget.texture;
-      displayMaterial.uniforms.uTexture.value = currentTarget.texture;
+      simMaterial.uniforms.uPrevTexture.value = prevTarget.texture;
+      simMaterial.uniforms.uCurrTexture.value = currTarget.texture;
+      displayMaterial.uniforms.uTexture.value = currTarget.texture;
+    }
+
+    function recreateTargets() {
+      prevTarget.dispose();
+      currTarget.dispose();
+      nextTarget.dispose();
+      prevTarget = createTarget();
+      currTarget = createTarget();
+      nextTarget = createTarget();
+      clearTarget(prevTarget);
+      clearTarget(currTarget);
+      clearTarget(nextTarget);
+      simMaterial.uniforms.uPrevTexture.value = prevTarget.texture;
+      simMaterial.uniforms.uCurrTexture.value = currTarget.texture;
+      displayMaterial.uniforms.uTexture.value = currTarget.texture;
     }
 
     function resize() {
       size.set(window.innerWidth, window.innerHeight);
+      texelSize.set(1 / window.innerWidth, 1 / window.innerHeight);
       renderer.setSize(window.innerWidth, window.innerHeight);
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-
-      currentTarget.dispose();
-      previousTarget.dispose();
-      currentTarget = createTarget();
-      previousTarget = createTarget();
-      primeTarget(currentTarget);
-      primeTarget(previousTarget);
-
-      simMaterial.uniforms.uPrevTexture.value = previousTarget.texture;
-      simMaterial.uniforms.uResolution.value.copy(size);
-      displayMaterial.uniforms.uTexture.value = currentTarget.texture;
+      recreateTargets();
+      paintBackground();
+      simMaterial.uniforms.uTexelSize.value.copy(texelSize);
       displayMaterial.uniforms.uResolution.value.copy(size);
     }
 
     window.addEventListener("resize", resize);
 
     window.addEventListener("pointermove", (event) => {
-      if (handDetected) return;
-      pointer.set(event.clientX / window.innerWidth, event.clientY / window.innerHeight);
+      if (handDetected) {
+        return;
+      }
+
+      rawPointer.set(event.clientX / window.innerWidth, event.clientY / window.innerHeight);
     });
 
     async function setupHands() {
@@ -341,7 +390,14 @@
 
         if (landmarks?.[8]) {
           const tip = landmarks[8];
-          pointer.set(1.0 - tip.x, tip.y);
+          const targetX = 1.0 - tip.x;
+          const targetY = tip.y;
+          const smoothing = 0.2;
+
+          rawPointer.set(targetX, targetY);
+          pointer.x += (targetX - pointer.x) * smoothing;
+          pointer.y += (targetY - pointer.y) * smoothing;
+
           handDetected = true;
           lastDetectionTime = performance.now();
         } else if (performance.now() - lastDetectionTime > 250) {
@@ -371,6 +427,7 @@
             sending = false;
           }
         }
+
         requestAnimationFrame(processFrame);
       };
 
@@ -387,24 +444,32 @@
       const delta = Math.min(clock.getDelta(), 0.033);
       const elapsed = clock.elapsedTime;
 
-      smoothedPointer.lerp(pointer, 1.0 - Math.pow(0.08, delta * 60.0));
-      velocity.copy(smoothedPointer).sub(lastPointer).multiplyScalar(1.0 / Math.max(delta, 0.001));
-      lastPointer.copy(smoothedPointer);
+      if (!handDetected) {
+        const smoothing = 1.0 - Math.pow(0.18, delta * 60.0);
+        pointer.lerp(rawPointer, smoothing);
+      }
 
-      simMaterial.uniforms.uTime.value = elapsed;
-      simMaterial.uniforms.uDelta.value = delta;
-      simMaterial.uniforms.uFingerPos.value.copy(smoothedPointer);
-      simMaterial.uniforms.uVelocity.value.copy(velocity);
-      simMaterial.uniforms.uActive.value = handDetected ? 1.0 : 0.8;
+      const targetVelocityX = (pointer.x - lastPointer.x) / Math.max(delta, 0.001);
+      const targetVelocityY = (pointer.y - lastPointer.y) / Math.max(delta, 0.001);
+      const velocitySmooth = 0.18;
+      velocity.x += (targetVelocityX - velocity.x) * velocitySmooth;
+      velocity.y += (targetVelocityY - velocity.y) * velocitySmooth;
+      lastPointer.copy(pointer);
+
+      simMaterial.uniforms.uFingerPos.value.copy(pointer);
+      simMaterial.uniforms.uFingerVelocity.value.copy(velocity);
+      simMaterial.uniforms.uActive.value = handDetected ? 1.0 : 0.9;
 
       displayMaterial.uniforms.uTime.value = elapsed;
 
-      renderer.setRenderTarget(currentTarget);
+      renderer.setRenderTarget(nextTarget);
       renderer.render(simScene, simCamera);
       renderer.setRenderTarget(null);
+
+      displayMaterial.uniforms.uTexture.value = nextTarget.texture;
       renderer.render(scene, camera);
 
-      swapTargets();
+      rotateTargets();
       requestAnimationFrame(animate);
     }
 
