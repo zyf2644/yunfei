@@ -1,4 +1,4 @@
-const CACHE_NAME = "hand-ripple-camera-v1";
+const CACHE_NAME = "hand-ripple-camera-v9";
 const ASSETS = [
   "./",
   "./index.html",

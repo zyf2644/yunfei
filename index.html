@@ -4,8 +4,11 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#050816" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="mobile-web-app-capable" content="yes" />
     <title>Hand Ripple Camera</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./styles.css?v=12" />
     <link rel="manifest" href="./manifest.webmanifest" />
   </head>
   <body>
@@ -22,12 +25,14 @@
         <div class="controls">
           <button id="startBtn">Start camera</button>
           <button id="switchBtn" disabled>Switch camera</button>
+          <button id="copyUrlBtn">Copy phone link</button>
         </div>
 
         <p id="status">Tap Start camera to begin.</p>
+        <p id="connectionHint" class="hint"></p>
       </section>
     </main>
 
-    <script type="module" src="./main.js"></script>
+    <script type="module" src="./main.js?v=12"></script>
   </body>
 </html>

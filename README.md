@@ -30,8 +30,14 @@ The camera only works on a secure page, so the easiest route is GitHub Pages.
 3. Open the published `https://` link on your phone.
 4. If prompted, allow camera access.
 
+## Phone-friendly use
+
+- The local server now prints a LAN URL, so you can open the same page from your phone on Wi-Fi.
+- On phones, the controls stay in a compact bottom sheet so the camera view stays visible.
+- For the camera to work on the phone browser, publish the app to HTTPS, for example with GitHub Pages.
+
 ## Notes
 
-- Camera access requires a secure context on most phones. `localhost` is allowed on desktop, but a phone may need HTTPS or a tunneling service.
+- Camera access requires a secure context on most phones. `localhost` is allowed on desktop, but a phone usually needs HTTPS or a tunneling service.
 - The hand tracking runs entirely in the browser using MediaPipe from a CDN.
 - This is a starter prototype, not a packaged app yet.
