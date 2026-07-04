@@ -1,9 +1,9 @@
-const CACHE_NAME = "hand-ripple-camera-v9";
+const CACHE_NAME = "hand-ripple-camera-v14";
 const ASSETS = [
   "./",
-  "./index.html",
-  "./styles.css",
-  "./main.js",
+  "./index.html?v=13",
+  "./styles.css?v=13",
+  "./main.js?v=17",
   "./manifest.webmanifest",
   "./icon.svg",
   "./README.md"

@@ -20,6 +20,7 @@ let processingFrame = false;
 let demoMode = true;
 let pointerDown = false;
 let trails = new Map();
+let cameraPlacement = null;
 
 const handLandmarksUrl = "https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js";
 
@@ -51,6 +52,10 @@ function getPhoneShareUrl() {
   return location.href;
 }
 
+function isMirroredCamera() {
+  return currentFacingMode === "user";
+}
+
 function updateConnectionHint() {
   if (isSecureEnough()) {
     setConnectionHint("On phones, camera access works best from HTTPS. If you open this over a local IP, it can still view the scene, but full camera permission usually needs a secure host such as GitHub Pages.");
@@ -60,71 +65,9 @@ function updateConnectionHint() {
   setConnectionHint("This page can open on a phone over Wi-Fi, but camera permission usually needs HTTPS. Use GitHub Pages or another secure host for the full experience.");
 }
 
-function getCanvasPoint(point, width, height) {
-  return {
-    x: (1 - point.x) * width,
-    y: point.y * height,
-  };
-}
-
-function drawBackground(width, height) {
-  const gradient = ctx.createLinearGradient(0, 0, width, height);
-  gradient.addColorStop(0, demoMode ? "rgba(35, 39, 44, 0.98)" : "rgba(5, 10, 20, 0.025)");
-  gradient.addColorStop(1, demoMode ? "rgba(12, 15, 20, 0.98)" : "rgba(4, 8, 16, 0.06)");
-  ctx.fillStyle = gradient;
-  ctx.fillRect(0, 0, width, height);
-}
-
-function createTrail(id) {
-  return {
-    id,
-    points: [],
-    active: false,
-    lastPoint: null,
-    idleFrames: 0,
-  };
-}
-
-function pushTrailPoint(trail, x, y, strength = 1) {
-  const lastPoint = trail.points[trail.points.length - 1];
-  const now = performance.now();
-  const nextPoint = { x, y, strength, createdAt: now };
-  if (lastPoint) {
-    const dx = x - lastPoint.x;
-    const dy = y - lastPoint.y;
-    const distance = Math.hypot(dx, dy);
-    if (distance < 2.5) {
-      return;
-    }
-  }
-
-  trail.points.push(nextPoint);
-  if (trail.points.length > 36) {
-    trail.points.shift();
-  }
-  trail.lastPoint = nextPoint;
-}
-
-function traceSmoothPath(context, points) {
-  context.beginPath();
-  context.moveTo(points[0].x, points[0].y);
-  for (let index = 1; index < points.length - 1; index += 1) {
-    const point = points[index];
-    const next = points[index + 1];
-    context.quadraticCurveTo(point.x, point.y, (point.x + next.x) / 2, (point.y + next.y) / 2);
-  }
-  const last = points[points.length - 1];
-  context.lineTo(last.x, last.y);
-}
-
-function updateRefractionFrame(width, height) {
-  if (!videoReady || camera.readyState < 2) {
-    return false;
-  }
-
-  if (refractionCanvas.width !== Math.ceil(width) || refractionCanvas.height !== Math.ceil(height)) {
-    refractionCanvas.width = Math.ceil(width);
-    refractionCanvas.height = Math.ceil(height);
+function getCameraPlacement(width, height) {
+  if (!videoReady || camera.videoWidth === 0 || camera.videoHeight === 0) {
+    return null;
   }
 
   const videoRatio = camera.videoWidth / camera.videoHeight;
@@ -142,122 +85,442 @@ function updateRefractionFrame(width, height) {
     offsetY = (height - drawHeight) / 2;
   }
 
-  refractionCtx.save();
-  refractionCtx.clearRect(0, 0, width, height);
-  refractionCtx.translate(width, 0);
-  refractionCtx.scale(-1, 1);
-  refractionCtx.drawImage(camera, offsetX, offsetY, drawWidth, drawHeight);
-  refractionCtx.restore();
+  return { drawWidth, drawHeight, offsetX, offsetY };
+}
+
+function getCanvasPointFromRaw(point, width, height, placement = cameraPlacement) {
+  const currentPlacement = placement || getCameraPlacement(width, height);
+  if (!currentPlacement) {
+    return {
+      x: point.x * width,
+      y: point.y * height,
+    };
+  }
+
+  const sourceX = currentPlacement.offsetX + point.x * currentPlacement.drawWidth;
+  const sourceY = currentPlacement.offsetY + point.y * currentPlacement.drawHeight;
+
+  return {
+    x: isMirroredCamera() ? width - sourceX : sourceX,
+    y: sourceY,
+  };
+}
+
+function drawCameraFrame(targetCtx, width, height) {
+  const placement = getCameraPlacement(width, height);
+  cameraPlacement = placement;
+
+  targetCtx.save();
+  targetCtx.clearRect(0, 0, width, height);
+
+  if (!placement) {
+    targetCtx.restore();
+    return null;
+  }
+
+  if (isMirroredCamera()) {
+    targetCtx.translate(width, 0);
+    targetCtx.scale(-1, 1);
+  }
+
+  targetCtx.drawImage(
+    camera,
+    placement.offsetX,
+    placement.offsetY,
+    placement.drawWidth,
+    placement.drawHeight,
+  );
+  targetCtx.restore();
+  return placement;
+}
+
+function drawBackground(width, height) {
+  const gradient = ctx.createLinearGradient(0, 0, width, height);
+  gradient.addColorStop(0, demoMode ? "rgba(35, 39, 44, 0.98)" : "rgba(5, 10, 20, 0.025)");
+  gradient.addColorStop(1, demoMode ? "rgba(12, 15, 20, 0.98)" : "rgba(4, 8, 16, 0.06)");
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, width, height);
+}
+
+function createTrail(id) {
+  return {
+    id,
+    points: [],
+    wakes: [],
+    active: false,
+    lastPoint: null,
+    lastWakePoint: null,
+    lastWakeAt: 0,
+    idleFrames: 0,
+  };
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function getPointDistance(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function getAngle(a, b, c) {
+  const abx = a.x - b.x;
+  const aby = a.y - b.y;
+  const cbx = c.x - b.x;
+  const cby = c.y - b.y;
+  const dot = abx * cbx + aby * cby;
+  const magnitude = Math.hypot(abx, aby) * Math.hypot(cbx, cby);
+  if (magnitude === 0) {
+    return 0;
+  }
+
+  return Math.acos(clamp(dot / magnitude, -1, 1));
+}
+
+function getPalmCenter(landmarks) {
+  const palmIndices = [0, 5, 9, 13, 17];
+  const center = palmIndices.reduce(
+    (accumulator, index) => ({
+      x: accumulator.x + landmarks[index].x,
+      y: accumulator.y + landmarks[index].y,
+    }),
+    { x: 0, y: 0 },
+  );
+
+  return {
+    x: center.x / palmIndices.length,
+    y: center.y / palmIndices.length,
+  };
+}
+
+function pushTrailPoint(trail, x, y, strength = 1) {
+  const lastPoint = trail.points[trail.points.length - 1];
+  const now = performance.now();
+  const nextPoint = { x, y, strength, createdAt: now };
+  if (lastPoint) {
+    const dx = x - lastPoint.x;
+    const dy = y - lastPoint.y;
+    const distance = Math.hypot(dx, dy);
+    if (distance < 2.5) {
+      return;
+    }
+  }
+
+  trail.points.push(nextPoint);
+  if (trail.points.length > 22) {
+    trail.points.shift();
+  }
+  trail.lastPoint = nextPoint;
+
+  if (lastPoint) {
+    const wakeDistance = trail.lastWakePoint ? getPointDistance(nextPoint, trail.lastWakePoint) : Infinity;
+    if (wakeDistance > 74 && now - trail.lastWakeAt > 140) {
+      const directionLength = Math.max(1, getPointDistance(nextPoint, lastPoint));
+      trail.wakes.push({
+        x,
+        y,
+        directionX: (x - lastPoint.x) / directionLength,
+        directionY: (y - lastPoint.y) / directionLength,
+        strength,
+        createdAt: now,
+      });
+      if (trail.wakes.length > 6) {
+        trail.wakes.shift();
+      }
+      trail.lastWakePoint = nextPoint;
+      trail.lastWakeAt = now;
+    }
+  }
+}
+
+function traceSmoothPath(context, points) {
+  context.beginPath();
+  context.moveTo(points[0].x, points[0].y);
+  for (let index = 1; index < points.length - 1; index += 1) {
+    const point = points[index];
+    const next = points[index + 1];
+    context.quadraticCurveTo(point.x, point.y, (point.x + next.x) / 2, (point.y + next.y) / 2);
+  }
+  const last = points[points.length - 1];
+  context.lineTo(last.x, last.y);
+}
+
+function buildRibbonOutline(points) {
+  if (points.length < 2) {
+    return null;
+  }
+
+  const leftEdge = [];
+  const rightEdge = [];
+  const lastIndex = points.length - 1;
+
+  points.forEach((point, index) => {
+    const previous = points[Math.max(0, index - 1)];
+    const next = points[Math.min(lastIndex, index + 1)];
+    const directionX = next.x - previous.x;
+    const directionY = next.y - previous.y;
+    const directionLength = Math.hypot(directionX, directionY) || 1;
+    const tangentX = directionX / directionLength;
+    const tangentY = directionY / directionLength;
+    const normalX = -tangentY;
+    const normalY = tangentX;
+    const tailFade = 1 - index / Math.max(1, lastIndex);
+    const width = 10 + tailFade * 13 + point.strength * 7;
+    const flutter = Math.sin(index * 0.9) * (1.2 + tailFade * 1.6);
+    const halfWidth = width + flutter;
+
+    leftEdge.push({
+      x: point.x + normalX * halfWidth,
+      y: point.y + normalY * halfWidth,
+    });
+    rightEdge.push({
+      x: point.x - normalX * halfWidth,
+      y: point.y - normalY * halfWidth,
+    });
+  });
+
+  return {
+    leftEdge,
+    rightEdge: rightEdge.reverse(),
+  };
+}
+
+function traceRibbonShape(context, points) {
+  const outline = buildRibbonOutline(points);
+  if (!outline) {
+    return false;
+  }
+
+  context.beginPath();
+  context.moveTo(outline.leftEdge[0].x, outline.leftEdge[0].y);
+
+  for (let index = 1; index < outline.leftEdge.length; index += 1) {
+    const point = outline.leftEdge[index];
+    const next = outline.leftEdge[Math.min(outline.leftEdge.length - 1, index + 1)];
+    context.quadraticCurveTo(point.x, point.y, (point.x + next.x) / 2, (point.y + next.y) / 2);
+  }
+
+  for (let index = 0; index < outline.rightEdge.length; index += 1) {
+    const point = outline.rightEdge[index];
+    const next = outline.rightEdge[Math.min(outline.rightEdge.length - 1, index + 1)];
+    context.quadraticCurveTo(point.x, point.y, (point.x + next.x) / 2, (point.y + next.y) / 2);
+  }
+
+  context.closePath();
   return true;
 }
 
-function drawWake(trail, now) {
-  const points = trail.points;
-  if (points.length < 2) {
-    return;
+function updateRefractionFrame(width, height) {
+  if (!videoReady || camera.readyState < 2) {
+    return false;
   }
 
-  const livePoints = points.filter((point) => now - point.createdAt < 1450);
-  if (livePoints.length < 2) {
-    return;
+  if (refractionCanvas.width !== Math.ceil(width) || refractionCanvas.height !== Math.ceil(height)) {
+    refractionCanvas.width = Math.ceil(width);
+    refractionCanvas.height = Math.ceil(height);
   }
 
-  const head = livePoints[livePoints.length - 1];
-  const previous = livePoints[livePoints.length - 2];
-  const motionLength = Math.max(1, Math.hypot(head.x - previous.x, head.y - previous.y));
-  const speed = Math.min(1, motionLength / 20);
-  const bodyWidth = 25 + head.strength * 9 + speed * 8;
-  const hasCameraFrame = updateRefractionFrame(canvas.clientWidth, canvas.clientHeight);
+  drawCameraFrame(refractionCtx, width, height);
+  return Boolean(cameraPlacement);
+}
 
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-
+function drawRefractionLayer(targetCtx, sourceCanvas, drawLayer) {
   const width = canvas.clientWidth;
   const height = canvas.clientHeight;
   if (liquidCanvas.width !== Math.ceil(width) || liquidCanvas.height !== Math.ceil(height)) {
     liquidCanvas.width = Math.ceil(width);
     liquidCanvas.height = Math.ceil(height);
   }
+
+  liquidCtx.setTransform(1, 0, 0, 1, 0, 0);
   liquidCtx.clearRect(0, 0, width, height);
-  if (hasCameraFrame) {
-    const bulge = 6 + speed * 5;
-    liquidCtx.globalAlpha = 0.96;
-    liquidCtx.drawImage(refractionCanvas, -bulge, -bulge, width + bulge * 2, height + bulge * 2);
-  } else {
-    const liquidFill = liquidCtx.createLinearGradient(head.x - 80, head.y - 80, head.x + 80, head.y + 80);
-    liquidFill.addColorStop(0, "rgba(255, 255, 255, 0.06)");
-    liquidFill.addColorStop(0.45, "rgba(190, 205, 214, 0.2)");
-    liquidFill.addColorStop(1, "rgba(255, 255, 255, 0.035)");
-    liquidCtx.fillStyle = liquidFill;
-    liquidCtx.fillRect(0, 0, width, height);
+  drawLayer.mask(liquidCtx);
+
+  if (sourceCanvas) {
+    liquidCtx.filter = `blur(${drawLayer.blur ?? 0}px)`;
+    liquidCtx.globalCompositeOperation = "source-in";
+    liquidCtx.globalAlpha = drawLayer.alpha ?? 1;
+    liquidCtx.drawImage(
+      sourceCanvas,
+      drawLayer.shiftX ?? 0,
+      drawLayer.shiftY ?? 0,
+      width + (drawLayer.expandX ?? 0),
+      height + (drawLayer.expandY ?? 0),
+    );
+    liquidCtx.filter = "none";
+  } else if (drawLayer.fallback) {
+    liquidCtx.globalCompositeOperation = "source-in";
+    drawLayer.fallback(liquidCtx, width, height);
   }
+
   liquidCtx.globalAlpha = 1;
-  liquidCtx.globalCompositeOperation = "destination-in";
-  liquidCtx.lineCap = "round";
-  liquidCtx.lineJoin = "round";
-  liquidCtx.strokeStyle = "#fff";
-  liquidCtx.lineWidth = bodyWidth;
-  traceSmoothPath(liquidCtx, livePoints);
-  liquidCtx.stroke();
   liquidCtx.globalCompositeOperation = "source-over";
-  ctx.drawImage(liquidCanvas, 0, 0);
+  targetCtx.drawImage(liquidCanvas, 0, 0);
+}
+
+function traceWakeFront(context, wake, age, scale = 1) {
+  const progress = clamp(age / 1650, 0, 1);
+  const perpendicularX = -wake.directionY;
+  const perpendicularY = wake.directionX;
+  const travel = (8 + progress * 24) * scale;
+  const length = (18 + progress * 88) * scale;
+  const width = (10 + progress * 36) * scale;
+  const headX = wake.x + wake.directionX * travel;
+  const headY = wake.y + wake.directionY * travel;
+  const tailX = headX - wake.directionX * length;
+  const tailY = headY - wake.directionY * length;
+  const offsetX = perpendicularX * width;
+  const offsetY = perpendicularY * width;
+
+  context.beginPath();
+  context.moveTo(tailX + offsetX, tailY + offsetY);
+  context.quadraticCurveTo(
+    headX - wake.directionX * length * 0.28 + offsetX * 0.46,
+    headY - wake.directionY * length * 0.28 + offsetY * 0.46,
+    headX,
+    headY,
+  );
+  context.quadraticCurveTo(
+    headX - wake.directionX * length * 0.28 - offsetX * 0.46,
+    headY - wake.directionY * length * 0.28 - offsetY * 0.46,
+    tailX - offsetX,
+    tailY - offsetY,
+  );
+}
+
+function renderTrailBody(trail, hasCameraFrame) {
+  const width = canvas.clientWidth;
+  const height = canvas.clientHeight;
+  const points = trail.points;
+  if (points.length < 2) {
+    return;
+  }
+
+  const now = performance.now();
+  const livePoints = points.filter((point) => now - point.createdAt < 1150);
+  if (livePoints.length < 2) {
+    return;
+  }
+
+  const head = livePoints[livePoints.length - 1];
+  const previous = livePoints[livePoints.length - 2];
+  const motion = Math.max(1, getPointDistance(head, previous));
+  const speed = clamp(motion / 18, 0, 1);
+  const bodyWidth = 22 + head.strength * 8 + speed * 15;
+
+  const renderRibbon = (alpha, widthScale, shiftScale, blurAmount) => drawRefractionLayer(ctx, hasCameraFrame ? refractionCanvas : null, {
+    alpha,
+    blur: blurAmount,
+    shiftX: (head.x - previous.x) * shiftScale,
+    shiftY: (head.y - previous.y) * shiftScale,
+    mask: (maskCtx) => {
+      maskCtx.save();
+      maskCtx.fillStyle = "#fff";
+      const scaledPoints = livePoints.map((point, index) => {
+        const tailFade = 1 - index / Math.max(1, livePoints.length - 1);
+        return {
+          ...point,
+          strength: point.strength * widthScale * (0.7 + tailFade * 0.55),
+        };
+      });
+      if (traceRibbonShape(maskCtx, scaledPoints)) {
+        maskCtx.fill();
+      }
+      maskCtx.beginPath();
+      maskCtx.arc(head.x, head.y, bodyWidth * 0.42 * widthScale, 0, Math.PI * 2);
+      maskCtx.fill();
+      maskCtx.restore();
+    },
+    fallback: (maskCtx) => {
+      const fill = maskCtx.createLinearGradient(head.x - 72, head.y - 72, head.x + 92, head.y + 92);
+      fill.addColorStop(0, `rgba(255, 255, 255, ${0.12 * alpha})`);
+      fill.addColorStop(0.48, `rgba(188, 214, 228, ${0.28 * alpha})`);
+      fill.addColorStop(1, `rgba(255, 255, 255, ${0.08 * alpha})`);
+      maskCtx.fillStyle = fill;
+      maskCtx.fillRect(0, 0, width, height);
+    },
+  });
+
+  renderRibbon(0.48, 1.0, 0.28, 0.2);
+  renderRibbon(0.24, 1.22, -0.1, 1.1);
+  renderRibbon(0.12, 1.46, 0.05, 2.2);
 
   ctx.save();
-  ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
-  ctx.shadowBlur = 8;
-  ctx.strokeStyle = "rgba(12, 16, 20, 0.48)";
-  ctx.lineWidth = bodyWidth + 7;
+  ctx.globalCompositeOperation = "screen";
+  ctx.fillStyle = "rgba(255, 255, 255, 0.08)";
+  if (traceRibbonShape(ctx, livePoints)) {
+    ctx.fill();
+  }
+  ctx.strokeStyle = "rgba(235, 246, 252, 0.24)";
+  ctx.lineWidth = Math.max(0.8, bodyWidth * 0.08);
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
   traceSmoothPath(ctx, livePoints);
   ctx.stroke();
+  ctx.fillStyle = "rgba(255, 242, 234, 0.28)";
+  ctx.beginPath();
+  ctx.arc(head.x, head.y, bodyWidth * 0.22, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
 
-  ctx.shadowBlur = 0;
-  ctx.drawImage(liquidCanvas, 0, 0);
-
-  const upperEdge = [];
-  const lowerEdge = [];
-  for (let index = 0; index < livePoints.length; index += 1) {
-    const before = livePoints[Math.max(0, index - 1)];
-    const after = livePoints[Math.min(livePoints.length - 1, index + 1)];
-    const tangentX = after.x - before.x;
-    const tangentY = after.y - before.y;
-    const tangentLength = Math.max(1, Math.hypot(tangentX, tangentY));
-    const edgeX = (-tangentY / tangentLength) * bodyWidth * 0.5;
-    const edgeY = (tangentX / tangentLength) * bodyWidth * 0.5;
-    upperEdge.push({ x: livePoints[index].x + edgeX, y: livePoints[index].y + edgeY });
-    lowerEdge.push({ x: livePoints[index].x - edgeX, y: livePoints[index].y - edgeY });
+function renderTrailWake(trail, now, hasCameraFrame) {
+  const wakes = trail.wakes.filter((wake) => now - wake.createdAt < 1650);
+  trail.wakes = wakes;
+  const visibleWakes = wakes.slice(-2);
+  if (visibleWakes.length === 0) {
+    return;
   }
 
-  ctx.shadowColor = "rgba(255, 255, 255, 0.45)";
-  ctx.shadowBlur = 3;
-  ctx.strokeStyle = "rgba(250, 253, 255, 0.72)";
-  ctx.lineWidth = 1.5;
-  traceSmoothPath(ctx, upperEdge);
-  ctx.stroke();
-  ctx.shadowBlur = 0;
-  ctx.strokeStyle = "rgba(205, 220, 228, 0.42)";
-  ctx.lineWidth = 1.1;
-  traceSmoothPath(ctx, lowerEdge);
-  ctx.stroke();
-  ctx.restore();
+  const renderShell = (alpha, scale, blurAmount, shiftX, shiftY) => {
+    drawRefractionLayer(ctx, hasCameraFrame ? refractionCanvas : null, {
+      alpha,
+      blur: blurAmount,
+      shiftX,
+      shiftY,
+      mask: (maskCtx) => {
+        maskCtx.save();
+        maskCtx.strokeStyle = "#fff";
+        maskCtx.lineCap = "round";
+        maskCtx.lineJoin = "round";
+        for (const wake of visibleWakes) {
+          const age = now - wake.createdAt;
+          const progress = clamp(age / 1650, 0, 1);
+          maskCtx.globalAlpha = Math.sin(progress * Math.PI) * 0.18;
+          maskCtx.lineWidth = (11 - progress * 7) * scale;
+          traceWakeFront(maskCtx, wake, age, scale);
+          maskCtx.stroke();
+        }
+        maskCtx.restore();
+      },
+      fallback: (maskCtx, width, height) => {
+        const fill = maskCtx.createLinearGradient(0, 0, width, height);
+        fill.addColorStop(0, "rgba(170, 202, 220, 0.2)");
+        fill.addColorStop(0.48, "rgba(255, 255, 255, 0.42)");
+        fill.addColorStop(1, "rgba(126, 162, 185, 0.18)");
+        maskCtx.fillStyle = fill;
+        maskCtx.fillRect(0, 0, width, height);
+      },
+    });
+  };
 
-  const dropletRadius = bodyWidth * 0.62;
-  const droplet = ctx.createRadialGradient(
-    head.x - dropletRadius * 0.32,
-    head.y - dropletRadius * 0.4,
-    1,
-    head.x,
-    head.y,
-    dropletRadius,
-  );
-  droplet.addColorStop(0, "rgba(255, 255, 255, 0.52)");
-  droplet.addColorStop(0.18, "rgba(255, 255, 255, 0.05)");
-  droplet.addColorStop(0.72, "rgba(120, 140, 150, 0.025)");
-  droplet.addColorStop(0.9, "rgba(255, 255, 255, 0.04)");
-  droplet.addColorStop(1, "rgba(255, 255, 255, 0.42)");
-  ctx.fillStyle = droplet;
-  ctx.beginPath();
-  ctx.arc(head.x, head.y, dropletRadius, 0, Math.PI * 2);
-  ctx.fill();
+  renderShell(0.12, 1, 0.4, 2, 1);
+  renderShell(0.06, 1.03, 1.2, -1, -1);
+
+  ctx.save();
+  ctx.globalCompositeOperation = "screen";
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  for (const wake of visibleWakes) {
+    const age = now - wake.createdAt;
+    const progress = clamp(age / 1650, 0, 1);
+    ctx.globalAlpha = Math.sin(progress * Math.PI) * 0.08;
+    ctx.strokeStyle = "rgba(235, 247, 255, 0.72)";
+    ctx.lineWidth = Math.max(0.6, 1.5 - progress * 0.9);
+    traceWakeFront(ctx, wake, age, 1);
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 function animateRipples() {
@@ -266,12 +529,13 @@ function animateRipples() {
   ctx.clearRect(0, 0, width, height);
   drawBackground(width, height);
 
+  const hasCameraFrame = updateRefractionFrame(width, height);
   ctx.save();
   ctx.globalCompositeOperation = "screen";
 
   for (const [id, trail] of trails) {
     const segments = trail.points.length - 1;
-    if (segments <= 0) {
+    if (segments <= 0 && trail.wakes.length === 0) {
       if (!trail.active) {
         trail.idleFrames += 1;
         if (trail.idleFrames > 36) {
@@ -282,13 +546,14 @@ function animateRipples() {
     }
 
     const now = performance.now();
-    drawWake(trail, now);
-    trail.points = trail.points.filter((point) => now - point.createdAt < 1450);
+    renderTrailBody(trail, hasCameraFrame);
+    renderTrailWake(trail, now, hasCameraFrame);
+    trail.points = trail.points.filter((point) => now - point.createdAt < 1100);
     if (trail.active) {
       trail.idleFrames = 0;
     } else {
       trail.idleFrames += 1;
-      if (trail.idleFrames > 36) {
+      if (trail.idleFrames > 140 && trail.wakes.length === 0) {
         trails.delete(id);
       }
     }
@@ -302,12 +567,37 @@ function isFingerExtended(landmarks, tipIndex, pipIndex, mcpIndex) {
   const tip = landmarks[tipIndex];
   const pip = landmarks[pipIndex];
   const mcp = landmarks[mcpIndex];
-  const tipToPip = Math.abs(tip.y - pip.y);
-  const pipToMcp = Math.abs(pip.y - mcp.y);
-  return tip.y < pip.y - 0.015 && tipToPip > pipToMcp * 0.35;
+  return getAngle(tip, pip, mcp) > (155 * Math.PI) / 180;
 }
 
-function getActiveFingers(landmarks) {
+function isThumbExtended(landmarks, handedness, palmCenter) {
+  const wrist = landmarks[0];
+  const thumbCmc = landmarks[1];
+  const thumbMcp = landmarks[2];
+  const thumbIp = landmarks[3];
+  const thumbTip = landmarks[4];
+  const indexMcp = landmarks[5];
+  const indexTip = landmarks[8];
+  const direction = handedness === "right" ? -1 : 1;
+  const spread = direction * (thumbTip.x - thumbMcp.x);
+  const tipAway = getPointDistance(thumbTip, palmCenter);
+  const ipAway = getPointDistance(thumbIp, palmCenter);
+  const mcpAway = getPointDistance(thumbMcp, wrist);
+  const webDistance = getPointDistance(thumbTip, indexMcp);
+  const tipToIndexTip = getPointDistance(thumbTip, indexTip);
+  const straight = getAngle(thumbTip, thumbIp, thumbMcp) > (145 * Math.PI) / 180;
+  const open = getAngle(thumbTip, thumbMcp, thumbCmc) > (150 * Math.PI) / 180;
+  return straight
+    && open
+    && spread > 0.04
+    && tipAway > ipAway + 0.016
+    && tipAway > mcpAway * 0.86
+    && webDistance > 0.085
+    && tipToIndexTip > 0.11;
+}
+
+function getActiveFingers(landmarks, handedness) {
+  const palmCenter = getPalmCenter(landmarks);
   const fingerMap = [
     { id: "thumb", tip: 4, pip: 3, mcp: 2 },
     { id: "index", tip: 8, pip: 6, mcp: 5 },
@@ -316,7 +606,19 @@ function getActiveFingers(landmarks) {
     { id: "pinky", tip: 20, pip: 18, mcp: 17 },
   ];
 
-  return fingerMap.filter((finger) => isFingerExtended(landmarks, finger.tip, finger.pip, finger.mcp));
+  return fingerMap.filter((finger) => {
+    if (finger.id === "thumb") {
+      return isThumbExtended(landmarks, handedness, palmCenter);
+    }
+
+    const tip = landmarks[finger.tip];
+    const pip = landmarks[finger.pip];
+    const mcp = landmarks[finger.mcp];
+    const wrist = landmarks[0];
+    return isFingerExtended(landmarks, finger.tip, finger.pip, finger.mcp)
+      && getPointDistance(tip, wrist) > getPointDistance(pip, wrist) * 1.02
+      && getAngle(tip, pip, mcp) > (155 * Math.PI) / 180;
+  });
 }
 
 function bindDemoInput() {
@@ -391,9 +693,10 @@ async function ensureHands() {
     const width = canvas.clientWidth;
     const height = canvas.clientHeight;
     const palm = results.multiHandLandmarks?.[0];
+    const handedness = results.multiHandedness?.[0]?.label?.toLowerCase() || "right";
 
     if (palm) {
-      const activeFingers = getActiveFingers(palm);
+      const activeFingers = getActiveFingers(palm, handedness);
 
       if (activeFingers.length === 0) {
         trails.clear();
@@ -404,7 +707,7 @@ async function ensureHands() {
       activeFingers.forEach((finger) => {
         const trail = trails.get(finger.id) || createTrail(finger.id);
         trails.set(finger.id, trail);
-        const point = getCanvasPoint(palm[finger.tip], width, height);
+        const point = getCanvasPointFromRaw(palm[finger.tip], width, height);
         pushTrailPoint(trail, point.x, point.y, finger.id === "thumb" ? 1.08 : 1);
         trail.active = true;
         trail.idleFrames = 0;
@@ -453,9 +756,11 @@ async function startCamera() {
     });
 
     camera.srcObject = stream;
+    camera.classList.toggle("mirrored", isMirroredCamera());
     await camera.play();
     demoMode = false;
     trails.clear();
+    cameraPlacement = null;
     videoReady = true;
     switchBtn.disabled = false;
     trackLoopRunning = true;

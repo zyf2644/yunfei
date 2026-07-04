@@ -46,7 +46,7 @@ body {
   object-fit: cover;
 }
 
-#camera {
+#camera.mirrored {
   transform: scaleX(-1);
 }
 
