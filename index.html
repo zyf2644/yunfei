@@ -242,6 +242,7 @@
           float up = texture2D(uCurrTexture, uv + vec2(0.0, uTexelSize.y)).r;
           float laplacian = (left + right + up + down) - 4.0 * curr;
 
+          // True second-order wave propagation so energy travels outward.
           float next = 2.0 * curr - prev + uWaveSpeed * laplacian;
           next *= uDamping;
 
@@ -289,6 +290,7 @@
 
           float dx = right - left;
           float dy = up - down;
+          // A restrained bump scale keeps the surface watery instead of jagged.
           vec3 normal = normalize(vec3(-dx * uBumpStrength, -dy * uBumpStrength, 1.0));
           vec3 lightDir = normalize(vec3(-0.4, 0.6, 0.75));
           vec3 viewDir = normalize(vec3(0.0, 0.0, 1.0));
