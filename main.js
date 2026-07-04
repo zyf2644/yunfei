@@ -1,4 +1,5 @@
 const camera = document.getElementById("camera");
+const pixiCanvas = document.getElementById("pixi");
 const canvas = document.getElementById("output");
 const ctx = canvas.getContext("2d");
 const startBtn = document.getElementById("startBtn");
@@ -21,8 +22,12 @@ let demoMode = true;
 let pointerDown = false;
 let trails = new Map();
 let cameraPlacement = null;
+let pixiRenderer = null;
+let pixiInitStarted = false;
+let pixiAvailable = false;
 
 const handLandmarksUrl = "https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js";
+const pixiModuleUrl = "https://cdn.jsdelivr.net/npm/pixi.js@8.7.0/dist/pixi.mjs";
 
 function resizeCanvas() {
   const rect = canvas.getBoundingClientRect();
@@ -30,6 +35,9 @@ function resizeCanvas() {
   canvas.width = Math.floor(rect.width * dpr);
   canvas.height = Math.floor(rect.height * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (pixiRenderer?.app?.renderer && rect.width > 0 && rect.height > 0) {
+    pixiRenderer.app.renderer.resize(Math.floor(rect.width), Math.floor(rect.height));
+  }
 }
 
 function isSecureEnough() {
@@ -140,6 +148,53 @@ function drawBackground(width, height) {
   gradient.addColorStop(1, demoMode ? "rgba(12, 15, 20, 0.98)" : "rgba(4, 8, 16, 0.06)");
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, width, height);
+}
+
+function updateTextureSource(texture) {
+  texture?.source?.update?.();
+}
+
+function getDisplaySize() {
+  return {
+    width: Math.max(1, canvas.clientWidth),
+    height: Math.max(1, canvas.clientHeight),
+  };
+}
+
+function drawPixiBackground(backgroundCtx, width, height) {
+  backgroundCtx.clearRect(0, 0, width, height);
+  const gradient = backgroundCtx.createLinearGradient(0, 0, width, height);
+  gradient.addColorStop(0, demoMode ? "rgba(26, 31, 38, 1)" : "rgba(4, 8, 16, 1)");
+  gradient.addColorStop(1, demoMode ? "rgba(10, 13, 18, 1)" : "rgba(3, 6, 14, 1)");
+  backgroundCtx.fillStyle = gradient;
+  backgroundCtx.fillRect(0, 0, width, height);
+
+  const bloom = backgroundCtx.createRadialGradient(width * 0.22, height * 0.12, 0, width * 0.22, height * 0.12, width * 0.46);
+  bloom.addColorStop(0, demoMode ? "rgba(90, 112, 145, 0.22)" : "rgba(32, 70, 112, 0.18)");
+  bloom.addColorStop(1, "rgba(0, 0, 0, 0)");
+  backgroundCtx.fillStyle = bloom;
+  backgroundCtx.fillRect(0, 0, width, height);
+
+  if (demoMode) {
+    backgroundCtx.strokeStyle = "rgba(210, 224, 255, 0.07)";
+    backgroundCtx.lineWidth = 1;
+    for (let x = width * 0.12; x < width; x += width * 0.12) {
+      backgroundCtx.beginPath();
+      backgroundCtx.moveTo(x, 0);
+      backgroundCtx.lineTo(x, height);
+      backgroundCtx.stroke();
+    }
+    for (let y = height * 0.14; y < height; y += height * 0.14) {
+      backgroundCtx.beginPath();
+      backgroundCtx.moveTo(0, y);
+      backgroundCtx.lineTo(width, y);
+      backgroundCtx.stroke();
+    }
+
+    backgroundCtx.fillStyle = "rgba(255, 255, 255, 0.045)";
+    backgroundCtx.fillRect(width * 0.64, height * 0.22, width * 0.18, height * 0.22);
+    backgroundCtx.fillRect(width * 0.16, height * 0.58, width * 0.14, height * 0.18);
+  }
 }
 
 function createTrail(id) {
@@ -402,6 +457,243 @@ function drawRefractionLayer(targetCtx, sourceCanvas, drawLayer) {
   targetCtx.restore();
 }
 
+function ensureDisplacementSize(width, height) {
+  if (!pixiRenderer) {
+    return;
+  }
+
+  const mapWidth = Math.max(64, Math.ceil(width));
+  const mapHeight = Math.max(64, Math.ceil(height));
+  if (pixiRenderer.displacementCanvas.width !== mapWidth || pixiRenderer.displacementCanvas.height !== mapHeight) {
+    pixiRenderer.displacementCanvas.width = mapWidth;
+    pixiRenderer.displacementCanvas.height = mapHeight;
+  }
+
+  if (pixiRenderer.backgroundCanvas.width !== Math.ceil(width) || pixiRenderer.backgroundCanvas.height !== Math.ceil(height)) {
+    pixiRenderer.backgroundCanvas.width = Math.ceil(width);
+    pixiRenderer.backgroundCanvas.height = Math.ceil(height);
+  }
+}
+
+function drawDisplacementBlob(displacementCtx, x, y, radius, shiftX, shiftY, alpha, angle = 0, stretch = 1.5) {
+  const red = clamp(Math.round(128 + shiftX), 0, 255);
+  const green = clamp(Math.round(128 + shiftY), 0, 255);
+  displacementCtx.save();
+  displacementCtx.translate(x, y);
+  displacementCtx.rotate(angle);
+  displacementCtx.scale(stretch, 1);
+  displacementCtx.fillStyle = `rgba(${red}, ${green}, 255, ${alpha})`;
+  displacementCtx.beginPath();
+  displacementCtx.arc(0, 0, radius, 0, Math.PI * 2);
+  displacementCtx.fill();
+  displacementCtx.restore();
+}
+
+function renderDisplacementMap(width, height, now) {
+  if (!pixiRenderer) {
+    return;
+  }
+
+  ensureDisplacementSize(width, height);
+  const displacementCtx = pixiRenderer.displacementCtx;
+  const mapWidth = pixiRenderer.displacementCanvas.width;
+  const mapHeight = pixiRenderer.displacementCanvas.height;
+
+  displacementCtx.save();
+  displacementCtx.setTransform(1, 0, 0, 1, 0, 0);
+  displacementCtx.globalCompositeOperation = "source-over";
+  displacementCtx.fillStyle = "rgba(128, 128, 255, 0.18)";
+  displacementCtx.fillRect(0, 0, mapWidth, mapHeight);
+  displacementCtx.globalCompositeOperation = "lighter";
+  displacementCtx.filter = "blur(8px)";
+
+  for (const trail of trails.values()) {
+    const livePoints = trail.points.filter((point) => now - point.createdAt < 1200);
+    if (livePoints.length < 2) {
+      continue;
+    }
+
+    for (let index = 0; index < livePoints.length; index += 1) {
+      const point = livePoints[index];
+      const previous = livePoints[Math.max(0, index - 1)];
+      const next = livePoints[Math.min(livePoints.length - 1, index + 1)];
+      const tangentX = next.x - previous.x;
+      const tangentY = next.y - previous.y;
+      const tangentLength = Math.hypot(tangentX, tangentY) || 1;
+      const dirX = tangentX / tangentLength;
+      const dirY = tangentY / tangentLength;
+      const normalX = -dirY;
+      const normalY = dirX;
+      const tailFade = 1 - index / Math.max(1, livePoints.length - 1);
+      const speed = clamp(tangentLength / 18, 0, 1.4);
+      const radius = 16 + tailFade * 11 + point.strength * 8 + speed * 8;
+      const dragX = clamp(normalX * 34 * point.strength + dirX * 14 * speed, -52, 52);
+      const dragY = clamp(normalY * 34 * point.strength + dirY * 14 * speed, -52, 52);
+      const angle = Math.atan2(dirY, dirX);
+      const x = point.x;
+      const y = point.y;
+
+      drawDisplacementBlob(displacementCtx, x, y, radius, dragX, dragY, 0.08 + tailFade * 0.08, angle, 1.55 + speed * 0.2);
+      drawDisplacementBlob(displacementCtx, x, y, radius * 0.56, -dragX * 0.36, -dragY * 0.36, 0.05 + tailFade * 0.04, angle + Math.PI / 2, 1.15);
+    }
+
+    for (const wake of trail.wakes) {
+      const age = now - wake.createdAt;
+      if (age > 1500) {
+        continue;
+      }
+      const progress = clamp(age / 1500, 0, 1);
+      const waveX = wake.x + wake.directionX * (14 + progress * 36);
+      const waveY = wake.y + wake.directionY * (14 + progress * 36);
+      const radius = 10 + progress * 26;
+      const alpha = Math.sin(progress * Math.PI) * 0.1;
+      const dragX = clamp(wake.directionY * 18, -28, 28);
+      const dragY = clamp(-wake.directionX * 18, -28, 28);
+      const angle = Math.atan2(wake.directionY, wake.directionX);
+      drawDisplacementBlob(displacementCtx, waveX, waveY, radius, dragX, dragY, alpha, angle, 2.1);
+    }
+  }
+
+  displacementCtx.restore();
+  updateTextureSource(pixiRenderer.displacementTexture);
+}
+
+function syncPixiVideoSprite(width, height) {
+  if (!pixiRenderer) {
+    return;
+  }
+
+  const { videoSprite } = pixiRenderer;
+  if (!videoReady || camera.readyState < 2) {
+    videoSprite.visible = false;
+    return;
+  }
+
+  const placement = getCameraPlacement(width, height);
+  if (!placement) {
+    videoSprite.visible = false;
+    return;
+  }
+
+  if (!pixiRenderer.videoTexture) {
+    pixiRenderer.videoTexture = pixiRenderer.modules.Texture.from(camera);
+    videoSprite.texture = pixiRenderer.videoTexture;
+  }
+
+  updateTextureSource(pixiRenderer.videoTexture);
+  videoSprite.visible = true;
+  videoSprite.height = placement.drawHeight;
+  videoSprite.width = placement.drawWidth;
+  videoSprite.y = placement.offsetY;
+  if (isMirroredCamera()) {
+    videoSprite.scale.x = -1;
+    videoSprite.x = placement.offsetX + placement.drawWidth;
+  } else {
+    videoSprite.scale.x = 1;
+    videoSprite.x = placement.offsetX;
+  }
+}
+
+function renderPixiScene(now) {
+  if (!pixiAvailable || !pixiRenderer) {
+    return false;
+  }
+
+  const { width, height } = getDisplaySize();
+  ensureDisplacementSize(width, height);
+  drawPixiBackground(pixiRenderer.backgroundCtx, width, height);
+  updateTextureSource(pixiRenderer.backgroundTexture);
+  pixiRenderer.backgroundSprite.width = width;
+  pixiRenderer.backgroundSprite.height = height;
+  pixiRenderer.highlightSprite.width = width;
+  pixiRenderer.highlightSprite.height = height;
+  syncPixiVideoSprite(width, height);
+  renderDisplacementMap(width, height, now);
+
+  let activeEnergy = 0;
+  for (const trail of trails.values()) {
+    activeEnergy += trail.points.length + trail.wakes.length * 1.5;
+  }
+  const filterScale = clamp((demoMode ? 26 : 18) + activeEnergy * 0.26, 18, demoMode ? 52 : 42);
+  pixiRenderer.displacementFilter.scale.x = filterScale;
+  pixiRenderer.displacementFilter.scale.y = filterScale * 0.82;
+  pixiRenderer.highlightSprite.alpha = clamp(0.12 + activeEnergy * 0.003, 0.12, 0.24);
+  return true;
+}
+
+async function initPixiRenderer() {
+  if (pixiInitStarted || pixiAvailable) {
+    return;
+  }
+
+  pixiInitStarted = true;
+  try {
+    const modules = await import(pixiModuleUrl);
+    const app = new modules.Application();
+    await app.init({
+      canvas: pixiCanvas,
+      backgroundAlpha: 0,
+      antialias: true,
+      autoDensity: true,
+      preference: "webgl",
+      resizeTo: document.querySelector(".app"),
+      resolution: window.devicePixelRatio || 1,
+    });
+
+    const scene = new modules.Container();
+    const backgroundCanvas = document.createElement("canvas");
+    const backgroundCtx = backgroundCanvas.getContext("2d");
+    const backgroundTexture = modules.Texture.from(backgroundCanvas);
+    const backgroundSprite = new modules.Sprite(backgroundTexture);
+    const videoSprite = new modules.Sprite();
+    scene.addChild(backgroundSprite);
+    scene.addChild(videoSprite);
+
+    const displacementCanvas = document.createElement("canvas");
+    const displacementCtx = displacementCanvas.getContext("2d");
+    const displacementTexture = modules.Texture.from(displacementCanvas);
+    const displacementSprite = new modules.Sprite(displacementTexture);
+    displacementSprite.visible = false;
+    const highlightSprite = new modules.Sprite(displacementTexture);
+    highlightSprite.alpha = 0.16;
+    highlightSprite.blendMode = "add";
+    app.stage.addChild(scene);
+    app.stage.addChild(displacementSprite);
+    app.stage.addChild(highlightSprite);
+
+    const displacementFilter = new modules.DisplacementFilter(displacementSprite);
+    displacementFilter.scale.x = 24;
+    displacementFilter.scale.y = 20;
+    scene.filters = [displacementFilter];
+
+    pixiRenderer = {
+      app,
+      modules,
+      scene,
+      backgroundCanvas,
+      backgroundCtx,
+      backgroundTexture,
+      backgroundSprite,
+      videoSprite,
+      videoTexture: null,
+      displacementCanvas,
+      displacementCtx,
+      displacementTexture,
+      displacementSprite,
+      highlightSprite,
+      displacementFilter,
+    };
+
+    pixiAvailable = true;
+    camera.classList.add("pixi-hidden");
+  } catch (error) {
+    console.warn("Pixi renderer unavailable, keeping 2D fallback.", error);
+    pixiAvailable = false;
+    pixiInitStarted = false;
+    camera.classList.remove("pixi-hidden");
+  }
+}
+
 function traceWakeFront(context, wake, age, scale = 1) {
   const progress = clamp(age / 1650, 0, 1);
   const perpendicularX = -wake.directionY;
@@ -659,10 +951,12 @@ function renderTrailWake(trail, now, hasCameraFrame) {
 function animateRipples() {
   const width = canvas.clientWidth;
   const height = canvas.clientHeight;
+  const now = performance.now();
+  const usingPixi = renderPixiScene(now);
   ctx.clearRect(0, 0, width, height);
-  drawBackground(width, height);
-
-  const hasCameraFrame = updateRefractionFrame(width, height);
+  if (!usingPixi) {
+    drawBackground(width, height);
+  }
 
   for (const [id, trail] of trails) {
     const segments = trail.points.length - 1;
@@ -676,9 +970,6 @@ function animateRipples() {
       continue;
     }
 
-    const now = performance.now();
-    renderTrailBody(trail, hasCameraFrame);
-    renderTrailWake(trail, now, hasCameraFrame);
     trail.points = trail.points.filter((point) => now - point.createdAt < 1100);
     if (trail.active) {
       trail.idleFrames = 0;
@@ -958,6 +1249,7 @@ copyUrlBtn.addEventListener("click", copyPhoneLink);
 bindDemoInput();
 
 resizeCanvas();
+initPixiRenderer();
 animateRipples();
 setStatus("Demo mode: move or drag the mouse to draw water trails.");
 updateConnectionHint();

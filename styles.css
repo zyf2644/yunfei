@@ -38,6 +38,7 @@ body {
 }
 
 #camera,
+#pixi,
 #output {
   position: absolute;
   inset: 0;
@@ -50,6 +51,11 @@ body {
   transform: scaleX(-1);
 }
 
+#camera.pixi-hidden {
+  opacity: 0;
+}
+
+#pixi,
 #output {
   pointer-events: none;
 }
